@@ -4,7 +4,7 @@
 [![rank](https://make.fun/badge/best-stealth-game-20261121-1759/xn6dmq/shadow-shift/rank.svg)](https://make.fun/bounty/best-stealth-game-20261121-1759/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=best-stealth-game-20261121-1759)
 [![reward](https://make.fun/badge/best-stealth-game-20261121-1759/xn6dmq/shadow-shift/reward.svg)](https://make.fun/bounty/best-stealth-game-20261121-1759?utm_source=github&utm_medium=readme&utm_campaign=best-stealth-game-20261121-1759)
 
-SHADOW SHIFT is an original top-down stealth game that runs offline in a desktop browser from static files: move with WASD or the arrow keys, sneak with Shift, and slip past patrolling guards and sweeping cameras across five hand-made facilities. Stay out of the guards' vision cones — being seen fills the alarm meter, and a full meter ends the night. Each night has its own objective: steal the keycard, hit the floor switch (which kills the cameras), or reach the data core — then reach the exit unseen. Crates, walls and shadow patches break a watcher's line of sight, and loud footsteps give you away.
+SHADOW SHIFT is a top-down stealth game that runs offline in a desktop browser from plain static files. You are a thief working five facilities in one night: cross each floor without stepping into a vision cone, lift the objective, and reach the exit before the alarm fills. Patrolling guards walk fixed routes, pause to scan, and turn toward loud footsteps; wall cameras sweep their own cones; dark floor patches cut a watcher's sight range in half. Holding Shift lets you sneak — slower, quieter, harder to hear. One night is a keycard grab, another is a floor switch that kills the cameras, and the last is the data core in the vault itself.
 
 ## Run it
 
@@ -13,6 +13,20 @@ node serve.ts
 ```
 
 Then open http://localhost:8080 in a desktop browser. No build step and no network requests: the game is the plain files under `game/`, and all of its sound is synthesised live with WebAudio.
+
+## Controls
+
+- **WASD / arrow keys** — move
+- **Shift** — sneak (slower, quieter)
+- **P / Esc** — pause
+- **R** — retry the night after being spotted
+
+## How it plays
+
+- Being seen fills the **alarm meter**; a full meter ends the night. Ducking out of sight drains it.
+- Guards hear loud footsteps nearby and turn to look; sneaking keeps your noise ring small.
+- The exit stays locked until the night's objective is taken: a **keycard**, a **floor switch** (which also shuts the cameras off), or the **data core**.
+- Five hand-made nights of rising difficulty, a title screen, a night-clear flow, and a win screen with your total time.
 
 ---
 

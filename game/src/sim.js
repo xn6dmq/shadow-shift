@@ -1,395 +1,269 @@
-// The rules of SHADOW SHIFT, with no drawing and no browser in it: the tile
-// grid, the infiltrator, patrolling guards with vision cones, sweeping
-// cameras, noise, shadow patches, and the alarm meter that decides whether a
-// night ends at the exit or in handcuffs. tick() advances one fixed step and
-// returns what happened as bit flags, so the caller can react (screens, sound)
-// without the sim knowing about either. Patrols and sweeps run on elapsed
-// time, never on chance, so the simulation is deterministic.
+// SHADOW SHIFT — the simulation. A World holds one level's live state: the
+// player, the patrols, the cameras, the alarm meter and the objective. It
+// knows nothing about drawing or sound; step() returns the events the frame
+// produced so the shell can answer them (footsteps, stings, pickups).
+import { TILE, FIELD_X, FIELD_Y, COLS, ROWS, PLAYER_R, SPEEDS, VIEW, ALARM, NOISE, STEP } from './config.js';
+import { LEVELS, parseLevel } from './levels.js';
 
-import { ALARM, CAM, DT, FLOOR, GUARD, SHADOW_FACTOR, THIEF, TILE } from './config.js';
-import { LEVELS } from './levels.js';
+const TAU = Math.PI * 2;
 
-export const FLAG_SPOTTED = 1;
-export const FLAG_CAUGHT = 2;
-export const FLAG_OBJECTIVE = 4;
-export const FLAG_CLEAR = 8;
-export const FLAG_STEP = 16;
-
-const RAY_STEP = 0.055;
-const SIGHT_SAMPLE = 6;
-
-/** Centre of a tile, in stage pixels. */
-export function tileCentre(tx, ty) {
-  return { x: FLOOR.x + tx * TILE + TILE / 2, y: FLOOR.y + ty * TILE + TILE / 2 };
+function angDiff(a, b) {
+  let d = a - b;
+  while (d > Math.PI) d -= TAU;
+  while (d < -Math.PI) d += TAU;
+  return d;
 }
 
-function wrapAngle(angle) {
-  let a = angle;
-  while (a > Math.PI) a -= Math.PI * 2;
-  while (a < -Math.PI) a += Math.PI * 2;
-  return a;
-}
-
-function turnToward(current, target, maxStep) {
-  const diff = wrapAngle(target - current);
-  if (Math.abs(diff) <= maxStep) return target;
-  return current + Math.sign(diff) * maxStep;
-}
-
-export function createSim() {
-  const s = {
-    night: 0,
-    nightName: '',
-    brief: '',
-    goal: 'keycard',
-    grid: [],
-    thief: { x: 0, y: 0, sneak: false, moving: false, noise: 0, face: 0 },
-    guards: [],
-    cams: [],
-    alarm: 0,
-    goalDone: false,
-    doorsOpen: false,
-    exit: { x: 0, y: 0 },
-    keycard: null,
-    pad: null,
-    core: null,
-    clock: 0,
-    nightClock: 0,
-    totalClock: 0,
-    closestGuard: Infinity,
-    beingSeen: false,
+function tileOf(x, y) {
+  return {
+    tx: Math.floor((x - FIELD_X) / TILE),
+    ty: Math.floor((y - FIELD_Y) / TILE),
   };
+}
 
-  function tileAt(tx, ty) {
-    if (tx < 0 || ty < 0 || ty >= s.grid.length || tx >= s.grid[0].length) return '#';
-    return s.grid[ty][tx];
+export class World {
+  constructor(levelIndex) {
+    this.levelIndex = levelIndex;
+    this.def = LEVELS[levelIndex];
+    const parsed = parseLevel(this.def);
+    this.walls = parsed.walls;
+    this.shadows = parsed.shadows;
+    this.start = parsed.player;
+    this.exit = parsed.exit;
+    this.objective = parsed.objective;
+    this.reset();
   }
 
-  function blocksSight(tx, ty) {
-    const t = tileAt(tx, ty);
-    if (t === '#' || t === 'B') return true;
-    if (t === 'D' && !s.doorsOpen) return true;
+  reset() {
+    this.player = { x: this.start.x, y: this.start.y };
+    this.guards = this.def.guards.map((g) => {
+      const [sx, sy] = g.path[0];
+      const [nx, ny] = g.path[1 % g.path.length];
+      return {
+        path: g.path.map(([tx, ty]) => ({ x: FIELD_X + tx * TILE + TILE / 2, y: FIELD_Y + ty * TILE + TILE / 2 })),
+        wp: 1 % g.path.length,
+        x: FIELD_X + sx * TILE + TILE / 2,
+        y: FIELD_Y + sy * TILE + TILE / 2,
+        pause: g.pause,
+        pauseT: 0,
+        scanT: 0,
+        facing: Math.atan2(ny - sy, nx - sx),
+        baseFace: Math.atan2(ny - sy, nx - sx),
+        alertT: 0,
+        speed: SPEEDS.guard,
+      };
+    });
+    this.cameras = this.def.cameras.map((c) => ({
+      x: FIELD_X + c.tile[0] * TILE + TILE / 2,
+      y: FIELD_Y + c.tile[1] * TILE + TILE / 2,
+      base: c.base,
+      sweep: c.sweep,
+      speed: c.speed,
+      t: 0,
+      angle: c.base,
+    }));
+    this.alarm = 0;
+    this.seenStreak = 0;
+    this.detected = false;
+    this.time = 0;
+    this.stepT = 0;
+    this.objectiveDone = false;
+    this.exitOpen = false;
+    this.camerasOff = false;
+    this.caught = false;
+    this.cleared = false;
+    this.events = [];
+  }
+
+  isWallTile(tx, ty) {
+    if (tx < 0 || ty < 0 || tx >= COLS || ty >= ROWS) return true;
+    return this.walls.has(`${tx},${ty}`);
+  }
+
+  hitsWall(x, y) {
+    const r = PLAYER_R;
+    const { tx, ty } = tileOf(x, y);
+    for (let oy = ty - 1; oy <= ty + 1; oy += 1) {
+      for (let ox = tx - 1; ox <= tx + 1; ox += 1) {
+        if (!this.isWallTile(ox, oy)) continue;
+        const cx = Math.max(FIELD_X + ox * TILE, Math.min(x, FIELD_X + (ox + 1) * TILE));
+        const cy = Math.max(FIELD_Y + oy * TILE, Math.min(y, FIELD_Y + (oy + 1) * TILE));
+        if ((x - cx) * (x - cx) + (y - cy) * (y - cy) < r * r) return true;
+      }
+    }
     return false;
   }
 
-  function solidPixel(x, y) {
-    return blocksSight(Math.floor((x - FLOOR.x) / TILE), Math.floor((y - FLOOR.y) / TILE));
+  isShadowAt(x, y) {
+    const { tx, ty } = tileOf(x, y);
+    return this.shadows.has(`${tx},${ty}`);
   }
 
-  function inShadow(x, y) {
-    return tileAt(Math.floor((x - FLOOR.x) / TILE), Math.floor((y - FLOOR.y) / TILE)) === 's';
-  }
-
-  /** True when the straight line between two points crosses no solid tile. */
-  function hasLine(x0, y0, x1, y1) {
-    const dx = x1 - x0;
-    const dy = y1 - y0;
+  /** Straight line from a watcher to a point: true when no wall crosses it. */
+  hasLineOfSight(wx, wy, px, py) {
+    const dx = px - wx;
+    const dy = py - wy;
     const dist = Math.hypot(dx, dy);
-    const steps = Math.max(1, Math.floor(dist / SIGHT_SAMPLE));
+    const steps = Math.max(1, Math.ceil(dist / 6));
     for (let i = 1; i < steps; i += 1) {
-      const t = i / steps;
-      if (solidPixel(x0 + dx * t, y0 + dy * t)) return false;
+      const { tx, ty } = tileOf(wx + (dx * i) / steps, wy + (dy * i) / steps);
+      if (this.isWallTile(tx, ty)) return false;
     }
     return true;
   }
 
   /**
-   * How strongly a watcher at (x, y) facing `angle` sees the thief: 0 out of
-   * range, outside the cone or behind cover; otherwise stronger the closer
-   * the thief is. A thief in shadow counts as much farther away.
+   * How strongly a watcher (guard or camera) sees the player right now:
+   * 0 when out of range, outside the cone or behind a wall; 1 when seen,
+   * 1.5 when seen up close. Standing on a shadow tile halves the range.
    */
-  function sightStrength(x, y, angle, range, halfAngle) {
-    const dx = s.thief.x - x;
-    const dy = s.thief.y - y;
+  seesFrom(watcher, px, py) {
+    const dx = px - watcher.x;
+    const dy = py - watcher.y;
     const dist = Math.hypot(dx, dy);
-    const reach = inShadow(s.thief.x, s.thief.y) ? range * SHADOW_FACTOR : range;
-    if (dist > reach) return 0;
-    if (Math.abs(wrapAngle(Math.atan2(dy, dx) - angle)) > halfAngle) return 0;
-    if (!hasLine(x, y, s.thief.x, s.thief.y)) return 0;
-    return 1 - (dist / reach) * 0.55;
+    let range = watcher.range;
+    if (this.isShadowAt(px, py)) range *= VIEW.shadowFactor;
+    if (dist > range) return 0;
+    if (Math.abs(angDiff(Math.atan2(dy, dx), watcher.facing)) > watcher.half) return 0;
+    if (!this.hasLineOfSight(watcher.x, watcher.y, px, py)) return 0;
+    return dist < ALARM.closeDist ? 1.5 : 1;
   }
 
-  /** The visible cone as a polygon: a fan of rays, each marched to cover. */
-  function coneShape(x, y, angle, range, halfAngle) {
-    const pts = [{ x, y }];
-    for (let a = -halfAngle; a <= halfAngle + 0.001; a += RAY_STEP) {
-      const ra = angle + a;
-      const cx = Math.cos(ra);
-      const sy = Math.sin(ra);
-      let dist = range;
-      for (let d = SIGHT_SAMPLE; d < range; d += SIGHT_SAMPLE) {
-        if (solidPixel(x + cx * d, y + sy * d)) {
-          dist = d;
-          break;
+  watchers() {
+    const list = this.guards.map((g) => ({
+      x: g.x, y: g.y, facing: g.facing, range: VIEW.guardRange, half: VIEW.guardHalf, alerted: g.alertT > 0, kind: 'guard',
+    }));
+    if (!this.camerasOff) {
+      for (const c of this.cameras) {
+        list.push({ x: c.x, y: c.y, facing: c.angle, range: VIEW.cameraRange, half: VIEW.cameraHalf, alerted: false, kind: 'camera' });
+      }
+    }
+    return list;
+  }
+
+  step(dt, input) {
+    this.events = [];
+    if (this.caught || this.cleared) return this.events;
+    this.time += dt;
+
+    // --- player movement (axis separated, so walls slide instead of stick)
+    const len = Math.hypot(input.mx, input.my) || 1;
+    const speed = input.sneak ? SPEEDS.sneak : SPEEDS.walk;
+    const vx = (input.mx / len) * speed * dt;
+    const vy = (input.my / len) * speed * dt;
+    const moving = input.mx !== 0 || input.my !== 0;
+    if (moving) {
+      if (!this.hitsWall(this.player.x + vx, this.player.y)) this.player.x += vx;
+      if (!this.hitsWall(this.player.x, this.player.y + vy)) this.player.y += vy;
+      this.stepT += dt;
+      const interval = input.sneak ? 0.52 : 0.34;
+      if (this.stepT >= interval) {
+        this.stepT = 0;
+        this.events.push(input.sneak ? 'step-quiet' : 'step');
+      }
+    }
+
+    // --- guards: patrol, pause and scan, or freeze and face a noise.
+    // Only loud (walking) footsteps are heard; sneaking is silent.
+    const loud = moving && !input.sneak;
+    for (const g of this.guards) {
+      if (g.alertT > 0) {
+        g.alertT -= dt;
+        g.facing = Math.atan2(this.player.y - g.y, this.player.x - g.x);
+        continue;
+      }
+      if (loud) {
+        const d = Math.hypot(this.player.x - g.x, this.player.y - g.y);
+        if (d < NOISE.hear) {
+          g.alertT = 1.5;
+          this.events.push('heard');
+          continue;
         }
       }
-      pts.push({ x: x + cx * dist, y: y + sy * dist });
-    }
-    return pts;
-  }
-
-  /** Move a circle by (dx, dy), sliding along solid tiles axis by axis. */
-  function slide(body, radius, dx, dy) {
-    body.x += dx;
-    let x0 = Math.floor((body.x - radius - FLOOR.x) / TILE);
-    let x1 = Math.floor((body.x + radius - FLOOR.x) / TILE);
-    let y0 = Math.floor((body.y - radius - FLOOR.y) / TILE);
-    let y1 = Math.floor((body.y + radius - FLOOR.y) / TILE);
-    for (let ty = y0; ty <= y1; ty += 1) {
-      for (let tx = x0; tx <= x1; tx += 1) {
-        if (!blocksSight(tx, ty)) continue;
-        const left = FLOOR.x + tx * TILE;
-        if (dx > 0) body.x = Math.min(body.x, left - radius - 0.01);
-        else if (dx < 0) body.x = Math.max(body.x, left + TILE + radius + 0.01);
+      if (g.pauseT > 0) {
+        g.pauseT -= dt;
+        g.scanT += dt;
+        g.facing = g.baseFace + Math.sin(g.scanT * 1.6) * 0.85;
+        continue;
       }
-    }
-    body.y += dy;
-    x0 = Math.floor((body.x - radius - FLOOR.x) / TILE);
-    x1 = Math.floor((body.x + radius - FLOOR.x) / TILE);
-    y0 = Math.floor((body.y - radius - FLOOR.y) / TILE);
-    y1 = Math.floor((body.y + radius - FLOOR.y) / TILE);
-    for (let ty = y0; ty <= y1; ty += 1) {
-      for (let tx = x0; tx <= x1; tx += 1) {
-        if (!blocksSight(tx, ty)) continue;
-        const top = FLOOR.y + ty * TILE;
-        if (dy > 0) body.y = Math.min(body.y, top - radius - 0.01);
-        else if (dy < 0) body.y = Math.max(body.y, top + TILE + radius + 0.01);
-      }
-    }
-  }
-
-  function loadNight(index) {
-    const level = LEVELS[index];
-    s.night = index;
-    s.nightName = level.name;
-    s.brief = level.brief;
-    s.goal = level.objective;
-    s.grid = level.map.map((row) => row.split(''));
-    s.alarm = 0;
-    s.goalDone = false;
-    s.doorsOpen = false;
-    s.clock = 0;
-    s.nightClock = 0;
-    s.beingSeen = false;
-    s.keycard = null;
-    s.pad = null;
-    s.core = null;
-
-    for (let ty = 0; ty < s.grid.length; ty += 1) {
-      for (let tx = 0; tx < s.grid[ty].length; tx += 1) {
-        const c = tileCentre(tx, ty);
-        const t = s.grid[ty][tx];
-        if (t === 'P') {
-          s.thief.x = c.x;
-          s.thief.y = c.y;
-        } else if (t === 'E') s.exit = c;
-        else if (t === 'K') s.keycard = { x: c.x, y: c.y, taken: false };
-        else if (t === 'S') s.pad = { x: c.x, y: c.y, pressed: false };
-        else if (t === 'C') s.core = { x: c.x, y: c.y, taken: false };
-      }
-    }
-    s.thief.sneak = false;
-    s.thief.moving = false;
-    s.thief.noise = 0;
-
-    s.guards = level.guards.map((def) => {
-      const start = tileCentre(def.path[0][0], def.path[0][1]);
-      const next = tileCentre(def.path[1][0], def.path[1][1]);
-      const heading = Math.atan2(next.y - start.y, next.x - start.x);
-      return {
-        x: start.x,
-        y: start.y,
-        angle: heading,
-        scanBase: heading,
-        route: def.path.map(([tx, ty]) => tileCentre(tx, ty)),
-        leg: 1,
-        pause: def.wait,
-        pauseLeft: 0,
-        walking: true,
-        suspicion: 0,
-        seeing: 0,
-        listening: false,
-        listenLeft: 0,
-        stepPhase: 0,
-        cone: [],
-      };
-    });
-
-    s.cams = level.cameras.map((def) => {
-      const c = tileCentre(def.at[0], def.at[1]);
-      return {
-        x: c.x, y: c.y,
-        base: def.base, sweep: def.sweep, speed: def.speed, phase: def.phase,
-        angle: def.base, seeing: 0, dead: false, cone: [],
-      };
-    });
-  }
-
-  function freshRun() {
-    s.totalClock = 0;
-    loadNight(0);
-  }
-
-  function updateGuard(g, dt) {
-    let flags = 0;
-    const thief = s.thief;
-
-    // Hearing: a walking thief is loud; a sneaking one barely whispers.
-    const distToThief = Math.hypot(thief.x - g.x, thief.y - g.y);
-    if (thief.noise > 0 && distToThief < thief.noise + GUARD.radius) {
-      g.listening = true;
-      g.listenLeft = GUARD.hearFor;
-    } else if (g.listenLeft > 0) {
-      g.listenLeft -= dt;
-      if (g.listenLeft <= 0) g.listening = false;
-    }
-
-    if (g.listening) {
-      g.angle = turnToward(g.angle, Math.atan2(thief.y - g.y, thief.x - g.x), GUARD.turn * dt);
-    } else if (!g.walking) {
-      g.pauseLeft -= dt;
-      const waited = g.pause - g.pauseLeft;
-      g.angle = g.scanBase + Math.sin(waited * GUARD.scanRate * 2.2) * GUARD.scanSwing;
-      if (g.pauseLeft <= 0) g.walking = true;
-    } else {
-      const target = g.route[g.leg];
+      const target = g.path[g.wp];
       const dx = target.x - g.x;
       const dy = target.y - g.y;
       const dist = Math.hypot(dx, dy);
-      if (dist < 4) {
-        g.leg = (g.leg + 1) % g.route.length;
-        const next = g.route[g.leg];
-        g.scanBase = Math.atan2(next.y - g.y, next.x - g.x);
-        g.walking = false;
-        g.pauseLeft = g.pause;
+      const move = g.speed * dt;
+      if (dist <= Math.max(move, 3)) {
+        g.x = target.x;
+        g.y = target.y;
+        g.wp = (g.wp + 1) % g.path.length;
+        const next = g.path[g.wp];
+        g.baseFace = Math.atan2(next.y - g.y, next.x - g.x);
+        g.facing = g.baseFace;
+        g.pauseT = g.pause;
+        g.scanT = 0;
       } else {
-        const heading = Math.atan2(dy, dx);
-        g.angle = turnToward(g.angle, heading, GUARD.turn * dt);
-        const facing = Math.cos(wrapAngle(heading - g.angle));
-        if (facing > 0.25) {
-          const len = GUARD.patrol * facing * dt;
-          slide(g, GUARD.radius, (dx / dist) * len, (dy / dist) * len);
-          g.stepPhase += dt * 3.4;
-          if (g.stepPhase >= 1) {
-            g.stepPhase = 0;
-            if (distToThief < 330) flags |= FLAG_STEP;
-          }
+        g.x += (dx / dist) * move;
+        g.y += (dy / dist) * move;
+        g.facing = Math.atan2(dy, dx);
+      }
+    }
+
+    // --- cameras sweep
+    for (const c of this.cameras) {
+      c.t += dt;
+      c.angle = c.base + Math.sin(c.t * c.speed) * c.sweep;
+    }
+
+    // --- alarm: seen anywhere fills it, hiding drains it. A glimpse under
+    // a third of a second is forgiven — the watcher has to hold the sight.
+    let seen = 0;
+    for (const w of this.watchers()) {
+      seen = Math.max(seen, this.seesFrom(w, this.player.x, this.player.y));
+    }
+    if (seen > 0) {
+      this.seenStreak += dt;
+      if (this.seenStreak > 0.35) {
+        this.alarm += dt * (seen > 1 ? ALARM.riseClose : ALARM.rise);
+        if (!this.detected) {
+          this.detected = true;
+          this.events.push('spotted');
         }
       }
-    }
-
-    g.seeing = sightStrength(g.x, g.y, g.angle, GUARD.sight, GUARD.halfCone);
-    if (g.seeing > 0) g.suspicion = Math.min(1, g.suspicion + g.seeing * dt * 1.7);
-    else g.suspicion = Math.max(0, g.suspicion - dt * 0.55);
-    g.cone = coneShape(g.x, g.y, g.angle, GUARD.sight, GUARD.halfCone);
-    return flags;
-  }
-
-  function updateCam(cam) {
-    cam.angle = cam.base + Math.sin(s.clock * cam.speed + cam.phase) * cam.sweep;
-    cam.dead = s.goal === 'switch' && s.goalDone;
-    cam.seeing = cam.dead
-      ? 0
-      : sightStrength(cam.x, cam.y, cam.angle, CAM.sight, CAM.halfCone);
-    cam.cone = cam.dead ? [] : coneShape(cam.x, cam.y, cam.angle, CAM.sight, CAM.halfCone);
-  }
-
-  /**
-   * One fixed step. `move` is the input vector (axes -1..1), `sneak` the Shift
-   * state. With `ghost` set (the title screen's backdrop) patrols walk and
-   * cones sweep, but nobody is seen, heard or caught and no objective can
-   * complete.
-   */
-  function tick(dt, move, sneak, ghost) {
-    let flags = 0;
-    s.clock += dt;
-    const thief = s.thief;
-
-    if (!ghost) {
-      s.nightClock += dt;
-      s.totalClock += dt;
-      const len = Math.hypot(move.x, move.y);
-      thief.moving = len > 0;
-      thief.sneak = sneak;
-      if (thief.moving) {
-        const speed = sneak ? THIEF.sneak : THIEF.walk;
-        const nx = (move.x / (len || 1)) * speed * dt;
-        const ny = (move.y / (len || 1)) * speed * dt;
-        slide(thief, THIEF.radius, nx, ny);
-        thief.face = Math.atan2(move.y, move.x);
-      }
-      thief.noise = thief.moving ? (sneak ? THIEF.quiet : THIEF.loud) : 0;
-    }
-
-    s.closestGuard = Infinity;
-    for (const g of s.guards) {
-      flags |= updateGuard(g, dt);
-      const d = Math.hypot(thief.x - g.x, thief.y - g.y);
-      if (d < s.closestGuard) s.closestGuard = d;
-    }
-    for (const cam of s.cams) updateCam(cam);
-
-    if (ghost) return flags;
-
-    // Detection: the strongest watcher drives the alarm; a heard noise adds a trickle.
-    let guardSeen = 0;
-    let camSeen = 0;
-    let heard = false;
-    for (const g of s.guards) {
-      if (g.seeing > guardSeen) guardSeen = g.seeing;
-      if (g.listening) heard = true;
-    }
-    for (const cam of s.cams) if (cam.seeing > camSeen) camSeen = cam.seeing;
-    const seen = guardSeen > 0 || camSeen > 0;
-    if (seen && !s.beingSeen) flags |= FLAG_SPOTTED;
-    s.beingSeen = seen;
-
-    if (seen) {
-      s.alarm += Math.max(ALARM.guardRate * guardSeen, ALARM.camRate * camSeen) * dt;
-    } else if (heard) {
-      s.alarm += ALARM.heardRate * dt;
     } else {
-      s.alarm -= ALARM.drain * dt;
+      this.seenStreak = 0;
+      this.detected = false;
+      this.alarm -= dt * ALARM.drain;
     }
-    s.alarm = Math.min(ALARM.max, Math.max(0, s.alarm));
-    if (s.alarm >= ALARM.max) {
-      flags |= FLAG_CAUGHT;
-      return flags;
-    }
-
-    // Objectives: keycard and core are taken by touch; the switch by standing on it.
-    if (!s.goalDone && s.keycard !== null && !s.keycard.taken) {
-      if (Math.hypot(thief.x - s.keycard.x, thief.y - s.keycard.y) < 26) {
-        s.keycard.taken = true;
-        s.goalDone = true;
-        s.doorsOpen = true;
-        flags |= FLAG_OBJECTIVE;
-      }
-    }
-    if (!s.goalDone && s.pad !== null && !s.pad.pressed) {
-      if (Math.hypot(thief.x - s.pad.x, thief.y - s.pad.y) < 20) {
-        s.pad.pressed = true;
-        s.goalDone = true;
-        s.doorsOpen = true;
-        flags |= FLAG_OBJECTIVE;
-      }
-    }
-    if (!s.goalDone && s.core !== null && !s.core.taken) {
-      if (Math.hypot(thief.x - s.core.x, thief.y - s.core.y) < 26) {
-        s.core.taken = true;
-        s.goalDone = true;
-        s.doorsOpen = true;
-        flags |= FLAG_OBJECTIVE;
-      }
+    this.alarm = Math.max(0, Math.min(100, this.alarm));
+    if (this.alarm >= 100) {
+      this.caught = true;
+      this.events.push('caught');
+      return this.events;
     }
 
-    // The exit only counts once the objective is done.
-    if (s.goalDone && Math.hypot(thief.x - s.exit.x, thief.y - s.exit.y) < 22) {
-      flags |= FLAG_CLEAR;
+    // --- objective, then the exit
+    if (!this.objectiveDone) {
+      const d = Math.hypot(this.objective.x - this.player.x, this.objective.y - this.player.y);
+      if (d < 28) {
+        this.objectiveDone = true;
+        this.exitOpen = true;
+        if (this.objective.type === 'switch') {
+          this.camerasOff = true;
+          this.events.push('switch');
+        } else {
+          this.events.push('pickup');
+        }
+        this.events.push('door');
+      }
     }
-    return flags;
+    if (this.exitOpen) {
+      const d = Math.hypot(this.exit.x - this.player.x, this.exit.y - this.player.y);
+      if (d < 28) {
+        this.cleared = true;
+        this.events.push('clear');
+      }
+    }
+    return this.events;
   }
-
-  loadNight(0);
-  return { state: s, loadNight, freshRun, tick, nights: LEVELS.length, step: DT };
 }
+
+export { STEP };

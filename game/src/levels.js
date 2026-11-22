@@ -1,164 +1,183 @@
-// The five facilities of SHADOW SHIFT, drawn as tile maps with their patrols
-// and cameras. Map letters: '#' wall, 'B' crate (solid cover), 's' a shadow
-// patch (watchers see half as far across it), '.' floor, 'P' where the
-// infiltrator starts, 'K' keycard, 'S' floor switch, 'C' data core, 'D' a
-// locked door and 'E' the exit pad. A door is solid until the level's
-// objective is done: take the keycard, stand on the switch (which also kills
-// every camera), or reach the data core. Guard paths are tile coordinates;
-// camera angles are radians, 0 facing east, positive clockwise.
+// SHADOW SHIFT — the five nights. Each level is a tile map plus the patrols
+// that walk it. Map legend:
+//   # wall        . floor       s shadow floor (halves a watcher's sight range)
+//   P player start   E exit     K keycard   W floor switch   C data core
+//   + doorway floor (drawn as floor; only marks a gap in a wall)
+// Guard paths are tile coordinates; a guard walks the list in order, pauses
+// and scans at each post, then moves on. Cameras sit on a tile and sweep a
+// cone around a base facing. Every waypoint and camera tile is floor.
+import { TILE, FIELD_X, FIELD_Y } from './config.js';
 
-export const TILE_WALL = '#';
-export const TILE_CRATE = 'B';
-export const TILE_SHADOW = 's';
-export const TILE_DOOR = 'D';
+const px = (tx, ty) => ({ x: FIELD_X + tx * TILE + TILE / 2, y: FIELD_Y + ty * TILE + TILE / 2 });
 
 export const LEVELS = [
   {
-    name: 'First Night',
+    name: 'Night 1 — First Night',
+    hint: 'Take the keycard, then slip out the exit.',
     objective: 'keycard',
-    brief: 'Steal the keycard. Reach the exit unseen.',
+    map: [
+      '########################',
+      '#P......#......#.......#',
+      '#.......#..s...#...K...#',
+      '#..s....#......#.......#',
+      '#.......#......#...#...#',
+      '#.......+......+...#...#',
+      '#.......#..s...#...#...#',
+      '#..s....#......#.......#',
+      '#.......#......#...#...#',
+      '#.......+......+...#...#',
+      '#.......#......#.......#',
+      '#..s.......s.......#..E#',
+      '#......................#',
+      '########################',
+    ],
     guards: [
-      { path: [[2, 5], [25, 5]], wait: 1.1 },
-      { path: [[25, 8], [4, 8]], wait: 0.9 },
+      { path: [[11, 2], [11, 10]], pause: 1.2 },
+      { path: [[17, 2], [17, 9]], pause: 1.4 },
     ],
     cameras: [],
-    map: [
-      '############################',
-      '#P....#........#...........#',
-      '#.....#........#.....K.....#',
-      '#.....#........#...........#',
-      '#.....#........#...........#',
-      '#..........................#',
-      '#..B.......B.......B.......#',
-      '#..........................#',
-      '#.....#........#...........#',
-      '#.....#........#....####...#',
-      '#.....#........#....#..#...#',
-      '#.....#........#....D.E#...#',
-      '#.....#........#....####...#',
-      '#..........................#',
-      '############################',
-    ],
   },
   {
-    name: 'Crossed Wires',
+    name: 'Night 2 — Crossed Wires',
+    hint: 'Three patrols cross the hall. Time the gaps.',
     objective: 'keycard',
-    brief: 'Three patrols cross here. Time them.',
+    map: [
+      '########################',
+      '#P....#.....#.....#..K.#',
+      '#.....#..s..#..s..#....#',
+      '#.....#.....#.....#....#',
+      '#.....+.....+.....+....#',
+      '#.....#..s..#..s..#..s.#',
+      '#.....#.....#.....#....#',
+      '#.......s.......s......#',
+      '#.....#.....#.....#....#',
+      '#..s..+.....+..s..+....#',
+      '#.....#.....#.....#....#',
+      '#.....#..s..#..s..#..E.#',
+      '#......................#',
+      '########################',
+    ],
     guards: [
-      { path: [[8, 1], [8, 8]], wait: 1.0 },
-      { path: [[3, 9], [24, 9]], wait: 0.8 },
-      { path: [[22, 5], [22, 10]], wait: 1.2 },
+      { path: [[3, 2], [3, 11]], pause: 1.0 },
+      { path: [[9, 1], [9, 12]], pause: 1.3 },
+      { path: [[15, 2], [15, 11]], pause: 1.1 },
     ],
     cameras: [],
-    map: [
-      '############################',
-      '#P...#......#......#....K..#',
-      '#....#......#......#.......#',
-      '#....#......#......#.......#',
-      '#....#......#......#.......#',
-      '#....ssss..................#',
-      '#....#......#......#.......#',
-      '#....#......#......#.......#',
-      '#....#......#......#.......#',
-      '#..........................#',
-      '#....#......#......#.......#',
-      '#....#......#......#..####.#',
-      '#....#......#......#..D.E#.#',
-      '#....#......#......#..####.#',
-      '############################',
-    ],
   },
   {
-    name: 'Glass Eye',
+    name: 'Night 3 — Glass Eye',
+    hint: 'Flip the floor switch: it kills the cameras and opens the door.',
     objective: 'switch',
-    brief: 'Hit the switch: it kills the cameras and opens the door.',
+    map: [
+      '########################',
+      '#P......#......#.......#',
+      '#...s...#..s...#...s...#',
+      '#.......#......#.......#',
+      '#.......#......#.......#',
+      '#...s...+......+...s...#',
+      '#.......#......#.......#',
+      '#.......#..W...#.......#',
+      '#...s...#......#...s...#',
+      '#.......#......#.......#',
+      '#.......#......#.......#',
+      '#...s.......s......#..E#',
+      '#......................#',
+      '########################',
+    ],
     guards: [
-      { path: [[9, 6], [9, 12]], wait: 1.0 },
-      { path: [[4, 10], [24, 10]], wait: 0.9 },
+      { path: [[5, 2], [5, 11]], pause: 1.2 },
+      { path: [[18, 2], [18, 11]], pause: 1.2 },
     ],
     cameras: [
-      { at: [14, 1], base: Math.PI / 2, sweep: 0.55, speed: 0.55, phase: 0 },
-      { at: [26, 5], base: Math.PI, sweep: 0.45, speed: 0.7, phase: 1.6 },
-    ],
-    map: [
-      '############################',
-      '#P....#........#...........#',
-      '#.....#........#...........#',
-      '#.....#........#...........#',
-      '#.....#........#...........#',
-      '#....ssss..................#',
-      '#..B...#....B...#.....B....#',
-      '#.....#........#...........#',
-      '#.....#........#...........#',
-      '#..........................#',
-      '#.....#........#...........#',
-      '#..S..#........#....####...#',
-      '#.....#........#....D.E#...#',
-      '#.....#........#....####...#',
-      '############################',
+      { tile: [12, 1], base: Math.PI / 2, sweep: 0.7, speed: 0.45 },
+      { tile: [12, 12], base: -Math.PI / 2, sweep: 0.7, speed: 0.55 },
     ],
   },
   {
-    name: 'Lockdown',
+    name: 'Night 4 — Lockdown',
+    hint: 'Four guards, one camera, no easy route.',
     objective: 'keycard',
-    brief: 'The keycard room is watched. So is everything else.',
+    map: [
+      '########################',
+      '#P..#.....#....#....#K.#',
+      '#...#..s..#..s.#.s..#..#',
+      '#...#.....#....#....#..#',
+      '#...+.....+....+....+..#',
+      '#...#..s..#..s.#.s..#..#',
+      '#...#.....#....#....#..#',
+      '#..s....s.....s.....s..#',
+      '#...#.....#....#....#..#',
+      '#...#..s..#..s.#.s..#..#',
+      '#...#.....#....#....#..#',
+      '#...#.....#....#....#E.#',
+      '#......................#',
+      '########################',
+    ],
     guards: [
-      { path: [[7, 2], [11, 2]], wait: 0.8 },
-      { path: [[17, 6], [17, 9]], wait: 1.0 },
-      { path: [[3, 10], [24, 10]], wait: 0.8 },
-      { path: [[23, 4], [23, 1]], wait: 1.1 },
+      { path: [[2, 1], [2, 12]], pause: 1.0 },
+      { path: [[7, 2], [7, 11]], pause: 1.2 },
+      { path: [[13, 2], [13, 11]], pause: 1.1 },
+      { path: [[18, 1], [18, 12]], pause: 1.3 },
     ],
     cameras: [
-      { at: [1, 5], base: 0, sweep: 0.4, speed: 0.6, phase: 0.8 },
-    ],
-    map: [
-      '############################',
-      '#P..#.......#.......#......#',
-      '#...#.......#.......#..K...#',
-      '#...#.......#.......#......#',
-      '#...#.......#.......#......#',
-      '#...ssss...................#',
-      '#...#.......#.......#......#',
-      '#...#.......#.......#......#',
-      '#...#.......#.......#......#',
-      '#..........................#',
-      '#...#.......#.......#......#',
-      '#...#.......#.......#.####.#',
-      '#...#.......#.......#D.E#..#',
-      '#...#.......#.......#.####.#',
-      '############################',
+      { tile: [12, 1], base: Math.PI / 2, sweep: 0.8, speed: 0.5 },
     ],
   },
   {
-    name: 'The Vault',
+    name: 'Night 5 — The Vault',
+    hint: 'Steal the data core from the vault. Then run.',
     objective: 'core',
-    brief: 'Reach the data core, then slip out the vault door.',
+    map: [
+      '########################',
+      '#P....#.....#.....#....#',
+      '#..s..#..s..#..s..#..C.#',
+      '#.....#.....#.....#....#',
+      '#.....+.....+.....+....#',
+      '#..s..#..s..#..s..#....#',
+      '#.....#.....#.....#....#',
+      '#.....#.....#.....#..#.#',
+      '#..s..#.....#.....#....#',
+      '#.....#..s..#..s..#..s.#',
+      '#.....#.....#.....#....#',
+      '#.....+.....+.....+..E.#',
+      '#......................#',
+      '########################',
+    ],
     guards: [
-      { path: [[6, 1], [6, 7]], wait: 0.9 },
-      { path: [[15, 2], [15, 8]], wait: 1.0 },
-      { path: [[4, 13], [23, 13]], wait: 0.8 },
-      { path: [[24, 6], [24, 1]], wait: 1.1 },
+      { path: [[3, 1], [3, 12]], pause: 1.0 },
+      { path: [[9, 2], [9, 11]], pause: 1.2 },
+      { path: [[15, 2], [15, 11]], pause: 1.1 },
+      { path: [[20, 4], [20, 12]], pause: 1.4 },
     ],
     cameras: [
-      { at: [13, 1], base: Math.PI / 2, sweep: 0.5, speed: 0.6, phase: 0 },
-      { at: [26, 8], base: Math.PI, sweep: 0.45, speed: 0.75, phase: 1.2 },
-    ],
-    map: [
-      '############################',
-      '#P..#......#.......#.......#',
-      '#...#......#.......#...C...#',
-      '#...#......#.......#.......#',
-      '#...#......#.......#.......#',
-      '#..........................#',
-      '#...#......#.......#...B...#',
-      '#...#......#.......#.......#',
-      '#......sssss...............#',
-      '#...#......#.......#.......#',
-      '#...#......#.......#..###..#',
-      '#...#......#.......#..D.E..#',
-      '#...#......#.......#..###..#',
-      '#...sssss..................#',
-      '############################',
+      { tile: [9, 1], base: Math.PI / 2, sweep: 0.7, speed: 0.5 },
+      { tile: [12, 12], base: -Math.PI / 2, sweep: 0.7, speed: 0.6 },
     ],
   },
 ];
+
+/** Turn a level definition into the lookup tables the simulation walks. */
+export function parseLevel(def) {
+  const walls = new Set();
+  const shadows = new Set();
+  const found = { player: null, exit: null, objective: null };
+  def.map.forEach((row, ty) => {
+    for (let tx = 0; tx < row.length; tx += 1) {
+      const ch = row[tx];
+      const key = `${tx},${ty}`;
+      if (ch === '#') walls.add(key);
+      if (ch === 's') shadows.add(key);
+      if (ch === 'P') found.player = px(tx, ty);
+      if (ch === 'E') found.exit = px(tx, ty);
+      if (ch === 'K' || ch === 'W' || ch === 'C') {
+        found.objective = { type: ch === 'K' ? 'keycard' : ch === 'W' ? 'switch' : 'core', ...px(tx, ty) };
+      }
+    }
+  });
+  return { walls, shadows, ...found };
+}
+
+/** Pixel position of a tile centre. Exported for the screenshot staging. */
+export function tileCentre(tx, ty) {
+  return px(tx, ty);
+}

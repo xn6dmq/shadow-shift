@@ -1,79 +1,180 @@
-// The screenshot scenes behind ?shot=start|play|end. Each stages the real
-// sim — real nights, real patrols, real cones — and steps the simulation
-// itself, so the frame is a moment the game can genuinely reach, and the same
-// staging always produces the same frame.
+// SHADOW SHIFT — the screenshot scenes behind ?shot=start|play|end. Each one
+// plays the real rules forward from a fresh level for a fixed number of
+// steps, steered by an autopilot that pathfinds to the objective on the tile
+// grid (a greedy walk gets stuck behind the first wall) and charges extra
+// for tiles a watcher can see, so it slips around cones instead of through
+// them. No randomness anywhere in the sim, so the same scene always gives
+// the same frame.
+import { STEP, TILE, FIELD_X, FIELD_Y, COLS, ROWS } from './config.js';
+import { World } from './sim.js';
 
-import { DT } from './config.js';
-import { VIEW_CAUGHT, VIEW_DONE, VIEW_PLAY, VIEW_TITLE } from './paint.js';
-import { tileCentre } from './sim.js';
-
-function stepGhost(sim, seconds) {
-  const steps = Math.round(seconds / DT);
-  for (let i = 0; i < steps; i += 1) sim.tick(DT, { x: 0, y: 0 }, false, true);
+function tileOf(x, y) {
+  return {
+    tx: Math.floor((x - FIELD_X) / TILE),
+    ty: Math.floor((y - FIELD_Y) / TILE),
+  };
 }
 
-/** Title: the first facility alive behind the panel, patrols mid-route. */
-function stageStart(sim) {
-  sim.loadNight(0);
-  stepGhost(sim, 2.6);
-  return { view: VIEW_TITLE };
+function tileCentre(tx, ty) {
+  return { x: FIELD_X + tx * TILE + TILE / 2, y: FIELD_Y + ty * TILE + TILE / 2 };
 }
 
 /**
- * Play: Crossed Wires, mid-run. The corridor guard has just stopped at the
- * middle of his route and is scanning east; the thief is caught at the very
- * edge of his cone, close enough that the alarm has climbed to just under half.
+ * Cheapest route over the tile grid from the player to (tx, ty). A step
+ * costs 1; a tile a watcher can see right now costs 11, and one a guard
+ * stands close to costs 7, so the route bends around cones when it can and
+ * only crosses one when it must. Returns pixel centres, start excluded.
  */
-function stagePlay(sim) {
-  sim.loadNight(1);
-  const guard = sim.state.guards[1];
-  const post = tileCentre(14, 9);
-  guard.x = post.x;
-  guard.y = post.y;
-  guard.walking = false;
-  guard.pause = 10;
-  guard.pauseLeft = 10;
-  guard.scanBase = 0;
-  guard.angle = 0;
-  guard.suspicion = 0.55;
-
-  const angle = 0.55;
-  const distance = 128;
-  sim.state.thief.x = guard.x + Math.cos(angle) * distance;
-  sim.state.thief.y = guard.y + Math.sin(angle) * distance;
-  sim.state.thief.face = angle;
-  sim.state.thief.moving = true;
-  sim.state.thief.noise = 100;
-
-  sim.tick(DT, { x: 0, y: 0 }, false, false);
-  sim.state.alarm = 46;
-  sim.state.nightClock = 38;
-  sim.state.totalClock = 74;
-  return { view: VIEW_PLAY };
+function planPath(world, tx, ty) {
+  const start = tileOf(world.player.x, world.player.y);
+  const key = (x, y) => `${x},${y}`;
+  const cost = new Map([[key(start.tx, start.ty), 0]]);
+  const prev = new Map();
+  const open = [[0, start.tx, start.ty]];
+  const watchers = world.watchers();
+  const seenCache = new Map();
+  const seenAt = (x, y) => {
+    const k = key(x, y);
+    if (!seenCache.has(k)) {
+      const c = tileCentre(x, y);
+      let seen = false;
+      for (const w of watchers) {
+        if (world.seesFrom(w, c.x, c.y)) { seen = true; break; }
+      }
+      seenCache.set(k, seen);
+    }
+    return seenCache.get(k);
+  };
+  while (open.length > 0) {
+    open.sort((a, b) => a[0] - b[0]);
+    const [c, x, y] = open.shift();
+    if (c !== cost.get(key(x, y))) continue;
+    if (x === tx && y === ty) {
+      const path = [];
+      let cur = key(x, y);
+      while (cur !== key(start.tx, start.ty)) {
+        const [px, py] = cur.split(',').map(Number);
+        path.unshift(tileCentre(px, py));
+        cur = prev.get(cur);
+      }
+      return path;
+    }
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const nx = x + dx;
+      const ny = y + dy;
+      if (world.isWallTile(nx, ny)) continue;
+      let step = 1;
+      if (seenAt(nx, ny)) step += 10;
+      for (const g of world.guards) {
+        const gt = tileOf(g.x, g.y);
+        if (Math.abs(gt.tx - nx) + Math.abs(gt.ty - ny) <= 1) step += 6;
+      }
+      const nc = c + step;
+      if (nc < (cost.get(key(nx, ny)) ?? Infinity)) {
+        cost.set(key(nx, ny), nc);
+        prev.set(key(nx, ny), key(x, y));
+        open.push([nc, nx, ny]);
+      }
+    }
+  }
+  return [];
 }
 
-/** End: The Vault cleared — the win screen over the last facility. */
-function stageEnd(sim) {
-  sim.loadNight(4);
-  const spot = tileCentre(20, 11);
-  sim.state.thief.x = spot.x;
-  sim.state.thief.y = spot.y;
-  sim.state.thief.face = Math.PI;
-  stepGhost(sim, 1.2);
-  sim.state.goalDone = true;
-  sim.state.doorsOpen = true;
-  sim.state.alarm = 0;
-  sim.state.nightClock = 52;
-  sim.state.totalClock = 187;
-  return { view: VIEW_DONE };
+/** One autopilot step: follow the planned route, sneaking all the way. */
+export function autopilot(world) {
+  const seenAtPoint = (x, y) => {
+    for (const w of world.watchers()) {
+      if (world.seesFrom(w, x, y)) return true;
+    }
+    return false;
+  };
+  // Spotted right now: break for the nearest tile no watcher can see,
+  // found by flood fill so the escape is a real route, not a 10px guess.
+  if (seenAtPoint(world.player.x, world.player.y)) {
+    const start = tileOf(world.player.x, world.player.y);
+    const seenTile = new Set();
+    const queue = [[start.tx, start.ty]];
+    seenTile.add(`${start.tx},${start.ty}`);
+    let escape = null;
+    while (queue.length > 0 && !escape) {
+      const [x, y] = queue.shift();
+      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const nx = x + dx;
+        const ny = y + dy;
+        const k = `${nx},${ny}`;
+        if (seenTile.has(k) || world.isWallTile(nx, ny)) continue;
+        seenTile.add(k);
+        const c = tileCentre(nx, ny);
+        if (!seenAtPoint(c.x, c.y)) {
+          escape = c;
+          break;
+        }
+        queue.push([nx, ny]);
+      }
+    }
+    if (escape) {
+      const dx = escape.x - world.player.x;
+      const dy = escape.y - world.player.y;
+      const len = Math.hypot(dx, dy);
+      if (len < 6) return { mx: 0, my: 0, sneak: true };
+      return { mx: dx / len, my: dy / len, sneak: true };
+    }
+    return { mx: 0, my: 0, sneak: true };
+  }
+  const target = world.objectiveDone ? world.exit : world.objective;
+  const t = tileOf(target.x, target.y);
+  const path = planPath(world, t.tx, t.ty);
+  const next = path.length > 0 ? path[0] : target;
+  // The next tile is covered: wait for the patrol to pass, like a player would.
+  if (path.length > 0 && seenAtPoint(next.x, next.y)) {
+    return { mx: 0, my: 0, sneak: true };
+  }
+  const dx = next.x - world.player.x;
+  const dy = next.y - world.player.y;
+  const len = Math.hypot(dx, dy);
+  if (len < 6) return { mx: 0, my: 0, sneak: true };
+  return { mx: dx / len, my: dy / len, sneak: true };
 }
 
-/** Set `sim` to the named scene (start, play or end; any other name is start). */
-export function stageShot(name, sim) {
-  if (name === 'play') return stagePlay(sim);
-  if (name === 'end') return stageEnd(sim);
-  return stageStart(sim);
+function runSteps(world, seconds, steer) {
+  const count = Math.floor(seconds / STEP);
+  for (let i = 0; i < count; i += 1) {
+    if (world.caught || world.cleared) break;
+    world.step(STEP, steer(world));
+  }
 }
 
-// Keep the caught view name referenced so a future scene can stage it.
-export const CAUGHT_VIEW = VIEW_CAUGHT;
+/**
+ * Stage `name` on a fresh game: start shows the title over a live Night 1,
+ * play shows a mid-level Night 3 with the alarm part-filled, end shows the
+ * win screen. Returns the screen to draw.
+ */
+export function stageShot(name, game) {
+  if (name === 'play') {
+    game.loadLevel(2);
+    runSteps(game.world, 12, autopilot);
+    // Lean into the nearest cone until the alarm reads clearly on the meter.
+    let nearest = game.world.guards[0];
+    for (const g of game.world.guards) {
+      if (Math.hypot(g.x - game.world.player.x, g.y - game.world.player.y)
+        < Math.hypot(nearest.x - game.world.player.x, nearest.y - game.world.player.y)) nearest = g;
+    }
+    for (let i = 0; i < Math.floor(4 / STEP) && game.world.alarm < 34; i += 1) {
+      const dx = nearest.x - game.world.player.x;
+      const dy = nearest.y - game.world.player.y;
+      const len = Math.hypot(dx, dy) || 1;
+      game.world.step(STEP, { mx: dx / len, my: dy / len, sneak: false });
+      if (game.world.caught) break;
+    }
+    return 'play';
+  }
+  if (name === 'end') {
+    game.loadLevel(4);
+    runSteps(game.world, 10, autopilot);
+    game.totalTime = 247;
+    return 'win';
+  }
+  game.loadLevel(0);
+  runSteps(game.world, 4, autopilot);
+  return 'title';
+}

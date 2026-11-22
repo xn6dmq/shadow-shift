@@ -1,65 +1,52 @@
-// SHADOW SHIFT's hand-in (Node 22, standard library only): the game is this
-// directory's game/ folder, plain static files a desktop browser loads offline
-// (game/index.html and its ES modules, no library and no network request), and
-// this program hands it in. It copies game/ and screenshots/ from beside this
-// file to /output and writes /output/dossier.json, the summary the judge
-// reads, with the vendored make.fun library.
+// SHADOW SHIFT — the hand-in. Copies game/ and screenshots/ beside this file
+// to the output directory and writes dossier.json, the summary the judge
+// reads, with the vendored make.fun library. Before anything is copied, the
+// entry is validated: the game must exist, and the screenshots must be the
+// real renders the kit requires (3 or 4 of them, each a JPEG or PNG under
+// 256 KiB). A broken entry never reaches the output directory.
 //
 // Serve it locally with `node serve.ts`, then open http://localhost:8080.
 // Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
 
-import { closeSync, cpSync, existsSync, mkdirSync, openSync, readSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildDossier } from './vendor/makefun-game.ts';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
 const out = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
+const MAX_SHOT_BYTES = 262144;
+
+/** The entry's own pre-flight: a bad hand-in fails here, before any copy. */
+function checkEntry() {
+  const index = join(here, 'game', 'index.html');
+  if (!existsSync(index)) throw new Error('missing game/index.html — the game is not here');
+  const shotsDir = join(here, 'screenshots');
+  if (!existsSync(shotsDir)) throw new Error('missing screenshots/ — render the three scenes first');
+  const shots = readdirSync(shotsDir).filter((name) => /\.(jpe?g|png)$/i.test(name)).sort();
+  if (shots.length < 3 || shots.length > 4) {
+    throw new Error(`need 3 or 4 screenshots, found ${shots.length}`);
+  }
+  for (const name of shots) {
+    const path = join(shotsDir, name);
+    const bytes = statSync(path).size;
+    if (bytes > MAX_SHOT_BYTES) throw new Error(`screenshot ${name} is ${bytes} bytes, over the 256 KiB cap`);
+    const head = readFileSync(path).subarray(0, 4);
+    const isJpeg = head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff;
+    const isPng = head[0] === 0x89 && head[1] === 0x50 && head[2] === 0x4e && head[3] === 0x47;
+    if (!isJpeg && !isPng) throw new Error(`screenshot ${name} is neither JPEG nor PNG`);
+  }
+  return shots;
+}
+
+const shots = checkEntry();
+console.log(`SHADOW SHIFT hand-in: ${shots.length} screenshots (${shots.join(', ')}) validated, game/ copied to ${out}`);
 
 mkdirSync(out, { recursive: true });
 cpSync(join(here, 'game'), join(out, 'game'), { recursive: true });
 mkdirSync(join(out, 'screenshots'), { recursive: true });
-if (existsSync(join(here, 'screenshots'))) cpSync(join(here, 'screenshots'), join(out, 'screenshots'), { recursive: true });
-
-// Pre-dossier validation, run before the dossier is written so a bad entry
-// fails loudly here instead of at the scorer: game/index.html must exist,
-// screenshots/ must hold 3 or 4 images, and each must be a whole JPEG or PNG
-// of at most 256 KiB.
-function checkEntry(): { shots: string[]; shotBytes: number } {
-  const index = join(here, 'game', 'index.html');
-  if (!existsSync(index)) throw new Error('missing game/index.html');
-  const shots = readdirSync(join(here, 'screenshots'))
-    .filter((name) => !name.startsWith('.'))
-    .sort();
-  if (shots.length < 3 || shots.length > 4) {
-    throw new Error(`expected 3 or 4 screenshots, found ${shots.length}`);
-  }
-  let shotBytes = 0;
-  for (const name of shots) {
-    const path = join(here, 'screenshots', name);
-    const info = statSync(path);
-    if (!info.isFile()) throw new Error(`screenshot ${name} is not a file`);
-    if (info.size > 262144) throw new Error(`screenshot ${name} is over 256 KiB`);
-    const head = Buffer.alloc(4);
-    const fd = openSync(path, 'r');
-    try {
-      readSync(fd, head, 0, 4, 0);
-    } finally {
-      closeSync(fd);
-    }
-    const isJpeg = head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff;
-    const isPng = head[0] === 0x89 && head[1] === 0x50 && head[2] === 0x4e && head[3] === 0x47;
-    if (!isJpeg && !isPng) throw new Error(`screenshot ${name} is neither JPEG nor PNG`);
-    shotBytes += info.size;
-  }
-  return { shots, shotBytes };
-}
-
-const checked = checkEntry();
-console.log(
-  `SHADOW SHIFT hand-in: ${checked.shots.length} screenshots (${checked.shotBytes} bytes) -> ${out}`,
-);
+cpSync(join(here, 'screenshots'), join(out, 'screenshots'), { recursive: true });
 
 // The scorer's own caps (reference/gate.json): only text_max_bytes shapes the bytes; the others refuse an entry the
 // scorer would refuse (more than 4 screenshots or one over 256 KiB; more than 993 files in game/ or 48 MiB of game
